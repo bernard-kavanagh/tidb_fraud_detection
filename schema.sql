@@ -151,3 +151,45 @@ ALTER TABLE reviews SET TIFLASH REPLICA 1;
 ALTER TABLE reviews DROP INDEX IF EXISTS idx_review_embedding;
 ALTER TABLE reviews ADD VECTOR INDEX idx_review_embedding ((VEC_L2_DISTANCE(embedding)));
 
+-- ==========================================
+-- 6. SPORTS BETTING (HTAP — alternate vertical)
+-- ==========================================
+
+/*
+   Betting events and individual wagers.
+   Demonstrates the same HTAP pattern as fraud detection applied to sportsbook
+   risk management: bets write to TiKV transactionally, liability concentration
+   and velocity anomaly queries aggregate live via TiFlash — no ETL.
+*/
+
+-- Betting Events: Fixtures available for wagering
+CREATE TABLE IF NOT EXISTS betting_events (
+    event_id    INT AUTO_INCREMENT PRIMARY KEY,
+    sport       VARCHAR(50),                        -- e.g. 'Football', 'Basketball', 'Tennis'
+    home_team   VARCHAR(100),
+    away_team   VARCHAR(100),
+    league      VARCHAR(100),                       -- e.g. 'Premier League', 'NBA'
+    event_time  DATETIME,
+    status      VARCHAR(20) DEFAULT 'active',       -- active, suspended, settled
+    home_odds   DECIMAL(6,3),
+    away_odds   DECIMAL(6,3),
+    draw_odds   DECIMAL(6,3)                        -- NULL for sports with no draw
+);
+
+-- Bets: Individual wagers placed by customers
+CREATE TABLE IF NOT EXISTS bets (
+    bet_id           INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id      INT,                           -- references customers (no FK for demo simplicity)
+    event_id         INT,
+    selection        VARCHAR(20),                   -- 'home', 'away', 'draw'
+    stake            DECIMAL(10,2),
+    odds             DECIMAL(6,3),
+    potential_payout DECIMAL(10,2),                -- stake * odds, computed at insert time
+    status           VARCHAR(20) DEFAULT 'accepted', -- accepted, voided, suspended, flagged
+    ip_address       VARCHAR(45),
+    placed_at        DATETIME DEFAULT NOW()
+);
+
+ALTER TABLE betting_events SET TIFLASH REPLICA 1;
+ALTER TABLE bets SET TIFLASH REPLICA 1;
+

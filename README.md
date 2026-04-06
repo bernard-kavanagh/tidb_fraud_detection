@@ -95,10 +95,12 @@ TIDB_SSL_CA=/path/to/isrgrootx1.pem
 
 In your TiDB Cloud SQL Editor, run `schema.sql`.
 
-This creates:
+This creates all tables in one step:
 - `customers`, `orders`, `products` — relational tables with TiFlash replicas
 - `sales_knowledge` — vector knowledge base with HNSW index
 - `agent_sessions`, `chat_history` — episodic memory tables
+- `reviews` — product and service reviews with sentiment scores and vector embeddings
+- `betting_events`, `bets` — sports betting tables with TiFlash replicas
 
 ### 3. Seed the demo data
 
@@ -125,7 +127,7 @@ python execution/seed_fraud_data.py
 
 **Optional — Sports Betting Demo:**
 ```bash
-# Run schema_betting.sql in TiDB Cloud SQL Editor first, then:
+# schema.sql already includes the betting tables — no extra schema step needed.
 python execution/seed_betting_data.py
 ```
 
@@ -242,8 +244,7 @@ Agent_AG/
 ├── agent_tools.py          # All agent tools: SQL, vector, fraud, betting write-backs
 ├── agent_state.py          # StateManager — session and history management
 ├── generate_world.py       # Seeds the full database (run once)
-├── schema.sql              # Core TiDB schema: TiFlash replicas + HNSW vector indexes
-├── schema_betting.sql      # Sports betting extension schema (run after schema.sql)
+├── schema.sql              # Full TiDB schema: all tables, TiFlash replicas, HNSW vector indexes
 ├── live_pulse.py           # Streams live orders every 500ms (fraud demo)
 ├── live_betting_pulse.py   # Streams live bets every 500ms (sports betting demo)
 ├── .env.example            # Credential template
