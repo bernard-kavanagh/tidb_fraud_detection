@@ -1,6 +1,10 @@
-# TiDB Unified Agent — Demo
+# TiDB Fraud Detection — Cognitive Foundation for Fintech
 
-Three demos. One database. No separate vector store, no data warehouse, no ETL pipeline.
+Three demos. One **unified data substrate**. No separate vector store, no data warehouse, no ETL pipeline.
+
+This platform implements the **cognitive foundation** architecture for fintech and gaming — adaptive fraud detection with three-tier memory on a single TiDB cluster. It demonstrates the **domain adapter** pattern: the same memory architecture used for [industrial IoT](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) and [database operations](https://github.com/bernard-kavanagh/tidb-self-healing-db-agent), adapted to e-commerce transactions and sports betting streams.
+
+Fraud detection hits the **Memory Wall** when transaction patterns evolve faster than static rules can adapt. The **Token Tax** compounds when every investigation must re-load the full transaction history. The cognitive foundation solves both: persistent three-tier memory with lifecycle management, served through budget-constrained context assembly.
 
 Most "unified database" pitches show a dashboard. This shows an **agent that reasons, queries, and acts** — combining SQL joins, vector similarity search, and real-time columnar analytics — all through a single TiDB connection string.
 
@@ -21,6 +25,8 @@ Most "unified database" pitches show a dashboard. This shows an **agent that rea
 | Native Vector / HNSW index | Separate vector database | Product search, policy retrieval |
 | Unified SQL interface | Multiple connection strings | One driver, one port (4000), all capabilities |
 | Transactional write-back | Application-level orchestration | `flag_order`, `adjust_odds`, `flag_bettor` — agent and dashboard write directly |
+
+**Cognitive foundation talking point:** The same cluster holds the live transaction stream (Data Plane) and the agent's investigation memory (Context Plane) in one ACID boundary. No sync lag between what the agent knows and what's happening in production.
 
 **The core talking point:** Both the fraud velocity query and the betting liability query use `/*+ read_from_storage(tiflash[...]) */` to aggregate across the columnar engine while the live pulse is simultaneously inserting rows into TiKV. Same data, same database, no synchronisation lag. No Flink, no Kafka, no enrichment pipeline.
 
@@ -51,6 +57,43 @@ execute_sql()   vector_search()        ← agent_tools.py
              ▼
    log_interaction()                   ← saves agent "thoughts" to chat_history
 ```
+
+The agent loads context from episodic memory (prior interactions) and semantic memory (knowledge base, policies) before reasoning — a form of **context assembly** where the platform decides what the model sees. In the EV charger platform, this was formalised as `assemble_context()` with five priority-ordered sources under a hard 3,600-token budget. The same principle applies here: curated context beats raw history.
+
+---
+
+## Cognitive Foundation: Three-Tier Memory
+
+This repo implements all three tiers of the cognitive foundation's memory architecture:
+
+### Episodic Memory
+**Tables**: `chat_history`, `agent_sessions`
+
+Every agent interaction — questions asked, tools invoked, reasoning chains, decisions made — is persisted as time-stamped episodic records. The agent logs its full chain of thought to TiDB on every turn. This provides a complete investigation trail for audit and regulatory compliance.
+
+### Semantic Memory
+**Tables**: `sales_knowledge`, `reviews`
+
+Persistent knowledge with vector embeddings: return policies, product specifications, fraud pattern signatures, sentiment baselines. The agent retrieves relevant knowledge via **hybrid search** — combining `execute_sql()` (relational queries) with `vector_search()` (semantic retrieval). Vectors catch meaning ('suspicious velocity' ≈ 'coordinated bot activity'). SQL catches identifiers (order IDs, IP addresses, customer segments).
+
+### Procedural Memory
+**Implementation**: Agent directives (`directives/tidb_agent_demo.md`), escalation logic, write-back actions
+
+The 'how-to' layer: when to flag an order for review vs auto-resolve, when to adjust odds vs freeze a market, when to escalate to a human analyst. Currently encoded in the agent directive and the write-back tools (`flag_order`, `adjust_odds`, `flag_bettor`). These write-back actions demonstrate **human-in-the-loop** decision gates — the agent surfaces the anomaly, the human (or automated policy) decides the action.
+
+> **Explicit procedural memory** — storing learned escalation strategies as a distinct memory type with its own retrieval path — is planned for the cognitive foundation project.
+
+## Custodial Duties in Fintech
+
+In fraud detection, two custodial duties are critical:
+
+**Reconciliation**: When a flagged transaction is later verified as a false positive, the older conclusion must be superseded. Without reconciliation, the agent accumulates false pattern matches that poison future investigations. The `superseded_by` chain (implemented in the EV charger platform) ensures truth evolves rather than accumulates.
+
+**Confidence Decay**: Fraud patterns are ephemeral. A 'hot' card-testing pattern from six months ago may be irrelevant today. Confidence decay ensures the knowledge store stays lean and current — memories that aren't reinforced by new evidence fade automatically.
+
+The remaining three duties — **write control** (only confirmed outcomes persist), **deduplication** (near-duplicate patterns merged), and **compaction** (periodic re-clustering) — apply identically to fraud as they do to IoT diagnostics. The memory infrastructure is domain-agnostic. Only the data flowing through it changes.
+
+> For the full five-duty framework, see [VOCABULARY.md](./VOCABULARY.md).
 
 ---
 
@@ -223,6 +266,8 @@ IPs with 5+ bets in 24 hours. Signals multi-accounting, arbitrage bots, or coord
 
 **The talking point:** Ververica solves this with Flink + a separate enrichment store to combine streaming data with historical context. TiDB does it in one query — the same database holds the live bet stream (TiKV) and the historical context for enrichment (TiFlash). Two HTAP queries, two write-back actions, one connection string.
 
+The cognitive foundation eliminates this separation architecturally — enrichment context (semantic memory), investigation history (episodic memory), and live transactions (data plane) share one transaction boundary. No ETL, no sync, no consistency gaps.
+
 **Vertical:** Gaming, gambling operators.
 
 ---
@@ -279,3 +324,19 @@ Agent_AG/
 | `No results` for sentiment/review queries | Run `seed_reviews.py` — seeds product and service reviews with embeddings |
 | `TOKENIZERS_PARALLELISM` warning | Already handled in `agent_ui.py` — safe to ignore |
 | TiFlash query falls back to TiKV | TiFlash replica sync takes ~1 min after schema creation — wait and retry |
+
+---
+
+## Cognitive Foundation Portfolio
+
+This repo is one of three implementations demonstrating the cognitive foundation architecture across different domains:
+
+| Repo | Domain | Primary memory tier | Custodial duty spotlight | Business outcome |
+|---|---|---|---|---|
+| [`tidb-self-healing-db-agent`](https://github.com/bernard-kavanagh/tidb-self-healing-db-agent) | Database operations | **Procedural** | Write control + branching safety | Reduced MTTR, safe autonomous remediation |
+| [`ev_charger_anomaly_detection`](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) | Industrial IoT | **Semantic** | All five — the reference implementation | 10x token reduction, 24/7 monitoring at capped cost |
+| [`tidb_fraud_detection`](https://github.com/bernard-kavanagh/tidb_fraud_detection) | Fintech / Gaming | **Episodic** | Reconciliation + confidence decay | Adaptive fraud detection, regulatory-grade audit trail |
+
+All three repos run on the same principle: a **unified data substrate** where the agent's memory lives alongside operational data. The **domain adapter** changes. The cognitive foundation stays the same.
+
+> *'The model forgets everything. The platform remembers. The human decides.'*
