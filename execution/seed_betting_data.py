@@ -229,6 +229,87 @@ def seed_betting_data():
 
         print(f"      ✅ Velocity burst seeded for Customer #{velocity_customer_id} from IP {velocity_ip}")
 
+        # ==========================================
+        # STEP 5: Arbitrage bot scenario (Phase A — betting adapter)
+        # ==========================================
+        # Single IP places opposing bets on the same event within seconds.
+        # The home+away pair guarantees a small return regardless of outcome.
+        print("\n   -> 🤖 ARBITRAGE BOT scenario...")
+        arb_ip = '203.0.113.99'
+        arb_customer = valid_customers[1] if len(valid_customers) > 1 else valid_customers[0]
+        arb_event_id, arb_event = football_events[1] if len(football_events) > 1 else (event_ids[0], events[0])
+        arb_time = now - timedelta(minutes=15)
+        for selection, odds_key in [('home', 'home_odds'), ('away', 'away_odds')]:
+            odds = arb_event[odds_key]
+            stake = round(800.00 if selection == 'home' else 1100.00, 2)  # arb-shaped ratio
+            cursor.execute(
+                """INSERT INTO bets
+                     (customer_id, event_id, selection, stake, odds, potential_payout,
+                      status, ip_address, placed_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'accepted', %s, %s)""",
+                (arb_customer, arb_event_id, selection, stake, odds,
+                 round(stake * odds, 2), arb_ip,
+                 arb_time + timedelta(seconds=random.randint(1, 4))),
+            )
+        print(f"      ✅ Arbitrage pair seeded on Event #{arb_event_id} from IP {arb_ip}")
+
+        # ==========================================
+        # STEP 6: Multi-accounting bonus abuse
+        # ==========================================
+        # 3 distinct customers, one IP+device, each claiming first-deposit bonus
+        # within the same session.
+        print("   -> 🎁 BONUS ABUSE scenario (3 accounts, shared session)...")
+        shared_session = "sess-" + "".join(random.choices("abcdef0123456789", k=12))
+        bonus_customers = random.sample(valid_customers, k=min(3, len(valid_customers)))
+        for c_id in bonus_customers:
+            cursor.execute(
+                """INSERT INTO customer_bonuses
+                     (customer_id, bonus_type, claimed_at, qualifying_session)
+                   VALUES (%s, 'first_deposit', %s, %s)""",
+                (c_id, now - timedelta(hours=2), shared_session),
+            )
+        print(f"      ✅ Bonus abuse seeded across {len(bonus_customers)} accounts (session={shared_session})")
+
+        # ==========================================
+        # STEP 7: Sharp-money / line-movement (odds_history)
+        # ==========================================
+        # Record odds at several timestamps for the first football event.
+        # The pattern: a sudden line movement 10-30 minutes after a high-stake
+        # bet from a previously-inactive bettor.
+        print("   -> 📉 Odds history snapshots (line movement for sharp-money detection)...")
+        sharp_event_id, sharp_event = football_events[0]
+        baseline_home = sharp_event['home_odds']
+        baseline_away = sharp_event['away_odds']
+        baseline_draw = sharp_event['draw_odds']
+        for minutes_ago, h_adj, a_adj in [
+            (90, 0.00, 0.00),    # baseline
+            (60, 0.00, 0.00),    # stable
+            (30, -0.10, 0.20),   # line moves AFTER the sharp bet
+            (15, -0.15, 0.30),
+            (5,  -0.20, 0.40),
+        ]:
+            cursor.execute(
+                """INSERT INTO odds_history
+                     (event_id, recorded_at, home_odds, away_odds, draw_odds, suspended)
+                   VALUES (%s, %s, %s, %s, %s, FALSE)""",
+                (sharp_event_id, now - timedelta(minutes=minutes_ago),
+                 round(baseline_home + h_adj, 3),
+                 round(baseline_away + a_adj, 3),
+                 round(baseline_draw or 3.40, 3) if baseline_draw is not None else None),
+            )
+        # The sharp bet: high-stake, on a fresh sport profile, 25 minutes before the move
+        sharp_customer = valid_customers[4] if len(valid_customers) > 4 else valid_customers[0]
+        cursor.execute(
+            """INSERT INTO bets
+                 (customer_id, event_id, selection, stake, odds, potential_payout,
+                  status, ip_address, placed_at)
+               VALUES (%s, %s, 'home', 5500.00, %s, %s, 'accepted', %s, %s)""",
+            (sharp_customer, sharp_event_id, baseline_home,
+             round(5500.00 * baseline_home, 2),
+             fake.ipv4(), now - timedelta(minutes=40)),
+        )
+        print(f"      ✅ Sharp-money pattern seeded on Event #{sharp_event_id}")
+
         conn.commit()
 
         print("\n✅ Betting data seeded successfully!")

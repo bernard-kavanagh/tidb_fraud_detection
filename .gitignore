@@ -41,3 +41,6 @@ ENV/
 # ── Misc ──────────────────────────────────────────────────────────────────────
 .tmp/
 *.log
+
+# ── Internal working notes (not for the public repo) ──────────────────────────
+REDUNDANT_CODE_AUDIT.md

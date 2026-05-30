@@ -2,13 +2,28 @@
 
 Three demos. One **unified data substrate**. No separate vector store, no data warehouse, no ETL pipeline.
 
-This platform implements the **cognitive foundation** architecture for fintech and gaming — adaptive fraud detection with three-tier memory on a single TiDB cluster. It demonstrates the **domain adapter** pattern: the same memory architecture used for [industrial IoT](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) and [database operations](https://github.com/bernard-kavanagh/tidb-self-healing-db-agent), adapted to e-commerce transactions and sports betting streams.
+This platform implements the **cognitive foundation** architecture for fintech and gaming — adaptive fraud detection with three-tier memory, substrate-driven model routing, and live custodial duties on a single TiDB cluster. It demonstrates the **domain adapter** pattern: the same memory architecture used for [industrial IoT](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) and [database operations](https://github.com/bernard-kavanagh/tidb-self-healing-db-agent), adapted to e-commerce transactions and sports betting streams via [`adapters/fraud/`](adapters/fraud/__init__.py).
 
-Fraud detection hits the **Memory Wall** when transaction patterns evolve faster than static rules can adapt. The **Token Tax** compounds when every investigation must re-load the full transaction history. The cognitive foundation solves both: persistent three-tier memory with lifecycle management, served through budget-constrained context assembly.
+> ### What's wired today (8 of 12 theses)
+>
+> - **Thesis 03 — Custodial duties.** Duty 1 (write control) is a code gate in [`compound_resolution()`](agent_tools.py); duty 2 (deduplication) is [`consolidate_fraud_memory()`](agent_tools.py), wired to a sidebar button. Duties 3–5 (reconciliation, decay, compaction) ship as documented stubs in [agent_tools.py](agent_tools.py).
+> - **Thesis 04 — Consolidation.** One TiDB cluster holds transactions, semantic memory, episodic checkpoints, and policy knowledge in one transaction boundary. No vector store, no cache, no warehouse.
+> - **Thesis 05 — Context assembly.** [`assemble_context()`](agent_tools.py) builds a 5-tier prompt under a 3,600-token budget. Pure SQL, zero LLM calls, ~50 ms target.
+> - **Thesis 06 — Substrate-driven routing.** [`route_investigation()`](agent_tools.py) **scans all Tier 5 matches** (canonical pattern from AGENT_LIFECYCLE.md §1 STEP 2). Any row passing both gates → Haiku/3-round shortcut. None passing → Sonnet/15-round explore. The gate decision is the demo moment.
+> - **Thesis 07 — Three tiers, no conflation.** [`agent_reasoning`](schema.sql) is structured episodic checkpoints (observation/hypothesis/evidence/confidence/resolution); [`fraud_memory`](schema.sql) is vector-indexed semantic memory; procedural logic lives in the adapter.
+> - **Thesis 08 — Supersede.** `superseded_by` column on `fraud_memory` ships; the dedup duty writes the link on every merge. Auto-supersede on contradiction (reconciliation) is the next duty to wire.
+> - **Thesis 10 — Compliance is architectural.** ACID-bounded writes, single transaction log, vectors-as-datatype. A single SQL query reconstructs the chain from trigger → assembled context → routing decision → tool trace → checkpoint → resolution. The structure is there; the single-query RCA demo is the artefact still to be recorded.
+> - **Thesis 11 — Pattern generic, domain is plugin.** Two adapters now share the same substrate: [`adapters/fraud/`](adapters/fraud/__init__.py) (16-pattern e-commerce catalog) and [`adapters/betting/`](adapters/betting/__init__.py) (3-pattern sports-book catalog). `assemble_context(adapter=...)` and `run_investigation(adapter=...)` pick the plugin.
+>
+> The four theses not yet delivered are 1 (memory is infrastructure — narrative claim, not testable code), 2 (model forgets / human decides — partially live via dedup; "human decides" needs an HITL approval gate), 9 (branching), and 12 (system of thought, not record — narrative claim).
+
+Fraud detection hits the **Memory Wall** when transaction patterns evolve faster than static rules can adapt and every investigation starts cold — context, prior patterns, and entity history rebuilt from scratch. The cognitive foundation solves this with persistent three-tier memory, substrate-driven model routing, and lifecycle management served through budget-constrained context assembly.
 
 Most "unified database" pitches show a dashboard. This shows an **agent that reasons, queries, and acts** — combining SQL joins, vector similarity search, and real-time columnar analytics — all through a single TiDB connection string.
 
-**Demo 1 — Agent UI:** A customer asks _"Can I return my gaming laptop?"_ The agent queries order history (SQL), retrieves the return policy (vector search), and synthesises a contextual answer — while logging its full chain of thought to TiDB as persistent episodic memory.
+**Demo 1 — Agent UI:** Two flows in one interface, demonstrating the difference between RAG and the cognitive foundation:
+- **Customer** asks _"Can I return my gaming laptop?"_ — the RAG path: SQL for order history + vector search for the return policy + Haiku synthesis.
+- **Admin** asks _"investigate suspicious orders from this IP"_ — the cognitive-foundation path: [`assemble_context()`](agent_tools.py) builds a 5-tier prompt under the token budget → [`route_investigation()`](agent_tools.py) picks Sonnet/explore or Haiku/shortcut based on `fraud_memory` matches → real tool-use loop with cached system prompt → slim summary call reads the structured checkpoint, not the loop. Every stage streams into the chain-of-thought sidebar.
 
 **Demo 2 — Fraud Dashboard:** Live transactions write to TiKV every 500ms. A TiFlash HTAP query detects velocity anomalies across those same rows in real time — no ETL, no separate warehouse. Suspicious orders can be flagged directly, or investigated via the Agent UI.
 
@@ -32,33 +47,68 @@ Most "unified database" pitches show a dashboard. This shows an **agent that rea
 
 ---
 
-## Architecture
+## Architecture — the cognitive foundation lifecycle
 
 ```
-User Question
-     │
-     ▼
-┌─────────────────────────────────────┐
-│         LLM Orchestration           │  ← decides which tool to call
-└─────────────────────────────────────┘
-     │               │
-     ▼               ▼
-execute_sql()   vector_search()        ← agent_tools.py
-     │               │
-     └───────┬───────┘
-             ▼
-    ┌─────────────────┐
-    │  TiDB Serverless │
-    │                 │
-    │  TiKV  TiFlash  │  ← same DB, two engines
-    │  Vector Index   │
-    └─────────────────┘
-             │
-             ▼
-   log_interaction()                   ← saves agent "thoughts" to chat_history
+                            Trigger (Admin chat / CLI / dashboard "Investigate")
+                                                  │
+                                                  ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  STEP 1 — assemble_context()    pure SQL · zero LLM calls · ~50 ms       │
+   │                                                                          │
+   │   T1 entity profile        T2 recent activity         T3 active checkpt   │
+   │   T4 prior investigations  T5 semantic (fraud_memory) ← vector retrieval  │
+   │   ──────────────────────────────────────────────────────────────────     │
+   │   Returns: system_context (≤3,600 tokens), top_match, vector_matches      │
+   └──────────────────────────────────────────────────────────────────────────┘
+                                                  │
+                                                  ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  STEP 2 — route_investigation()  code-driven, not LLM                    │
+   │                                                                          │
+   │   Scan vector_matches:                                                   │
+   │     any row with confidence ≥ 0.85 AND similarity ≥ gate                 │
+   │       yes → SHORTCUT (Haiku, 3 rounds)                                   │
+   │       no  → EXPLORE  (Sonnet, 15 rounds)                                 │
+   │                                                                          │
+   │   On SHORTCUT match → reinforce_pattern() bumps evidence_count           │
+   └──────────────────────────────────────────────────────────────────────────┘
+                                                  │
+                                                  ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  STEP 3 — agent loop (cognitive_loop.run_investigation)                  │
+   │                                                                          │
+   │   System prompt cached (cache_control: ephemeral) + adapter SCHEMA_HINT  │
+   │   Tools: execute_sql, vector_search, recall_similar_fraud,               │
+   │          flag_order, write_reasoning_checkpoint, compound_resolution     │
+   │   Model picks the next tool. Loop ends on end_turn or round budget.      │
+   └──────────────────────────────────────────────────────────────────────────┘
+                                                  │
+                                                  ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  STEP 4 — slim summary call (Haiku on structured checkpoint, NOT loop)   │
+   │                                                                          │
+   │   SELECT latest agent_reasoning row → 3-paragraph investigation report   │
+   │   Fallback: synthesise checkpoint from tool_trace if agent didn't write  │
+   └──────────────────────────────────────────────────────────────────────────┘
+                                                  │
+                                                  ▼
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  ONE TiDB CLUSTER                                                        │
+   │                                                                          │
+   │   TiKV (row) ────► live transactions, bets, orders, sessions             │
+   │   TiFlash (col) ─► HTAP velocity + liability queries on same writes      │
+   │   Vector / HNSW ─► fraud_memory, sales_knowledge, reviews                │
+   │                                                                          │
+   │   Custodial duties run as SQL inside the cluster:                        │
+   │     1 Write Control   ✅   2 Deduplication   ✅   3 Reconciliation 🟡 POC │
+   │     4 Confidence Decay ✅   5 Compaction     🟡 POC                       │
+   └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-The agent loads context from episodic memory (prior interactions) and semantic memory (knowledge base, policies) before reasoning — a form of **context assembly** where the platform decides what the model sees. In the EV charger platform, this was formalised as `assemble_context()` with five priority-ordered sources under a hard 3,600-token budget. The same principle applies here: curated context beats raw history.
+**Five priority-ordered context sources, one substrate-driven routing decision, one cached system prompt, one structured summary.** The agent is stateless and ephemeral; the substrate remembers on its behalf. Pure SQL handles everything that isn't reasoning — assembly, routing, custodial duties — and the model only ever sees a curated prompt under a hard token budget.
+
+See [directives/tidb_agent_demo.md](directives/tidb_agent_demo.md) for the lifecycle described in operator language.
 
 ---
 
@@ -67,14 +117,20 @@ The agent loads context from episodic memory (prior interactions) and semantic m
 This repo implements all three tiers of the cognitive foundation's memory architecture:
 
 ### Episodic Memory
-**Tables**: `chat_history`, `agent_sessions`
+**Tables**: `agent_reasoning` (structured checkpoints), `chat_history` (conversation transcript), `agent_sessions`
 
-Every agent interaction — questions asked, tools invoked, reasoning chains, decisions made — is persisted as time-stamped episodic records. The agent logs its full chain of thought to TiDB on every turn. This provides a complete investigation trail for audit and regulatory compliance.
+`agent_reasoning` stores **outcomes-only checkpoints** — `observation`, `hypothesis`, `evidence_refs` (JSON), `confidence`, `resolution`. Written by the agent loop via [`write_reasoning_checkpoint()`](agent_tools.py). The Stage 5 slim summary call reads ONE row of this table to produce the investigation report — it does not replay the loop conversation. Memory grows at O(investigations), not O(reasoning steps) — Thesis 03 (write control).
+
+`chat_history` remains as a UI-facing transcript for the conversational paths. It is not the episodic memory the routing layer reads.
 
 ### Semantic Memory
-**Tables**: `sales_knowledge`, `reviews`
+**Tables**: `fraud_memory` (learned patterns), `sales_knowledge`, `reviews`
 
-Persistent knowledge with vector embeddings: return policies, product specifications, fraud pattern signatures, sentiment baselines. The agent retrieves relevant knowledge via **hybrid search** — combining `execute_sql()` (relational queries) with `vector_search()` (semantic retrieval). Vectors catch meaning ('suspicious velocity' ≈ 'coordinated bot activity'). SQL catches identifiers (order IDs, IP addresses, customer segments).
+`fraud_memory` is the compounding tier. Each confirmed investigation can write a pattern via [`compound_resolution()`](agent_tools.py) — vector-embedded, scoped `global` or `entity`, with `confidence`, `evidence_count`, `superseded_by`, and `last_reinforced_at`. Future agent sessions recall these patterns via [`recall_similar_fraud()`](agent_tools.py) or surface them automatically through Tier 5 of `assemble_context()`. The routing gate reads `confidence ≥ 0.85 AND similarity ≥ 0.55` from this table to decide Sonnet/explore vs Haiku/shortcut.
+
+`sales_knowledge` and `reviews` remain hand-seeded reference knowledge for the customer/RAG flow.
+
+**Cold-start solution.** [`adapters/fraud/`](adapters/fraud/__init__.py) ships with a `SEED_CATALOG` of 16 e-commerce fraud patterns (velocity, ATO, refund abuse, synthetic identity, device-fingerprint reuse, headless-browser, chargeback, gift-card laundering). [`adapters/betting/`](adapters/betting/__init__.py) adds 3 sportsbook patterns. Click the *"🌱 Seed fraud_memory"* sidebar button to load them — the cluster skips the warm-up curve and routes shortcut from invocation 1, the same way production EV charger clusters do.
 
 ### Procedural Memory
 **Implementation**: Agent directives (`directives/tidb_agent_demo.md`), escalation logic, write-back actions
@@ -85,14 +141,18 @@ The 'how-to' layer: when to flag an order for review vs auto-resolve, when to ad
 
 ## Custodial Duties in Fintech
 
-In fraud detection, two custodial duties are critical:
+| Duty | Status | Implementation |
+|---|---|---|
+| **Write Control** | ✅ Live (code gate) | [`compound_resolution()`](agent_tools.py) rejects writes below `WRITE_CONTROL_MIN_CONFIDENCE` (default 0.85). Deterministic enforcement; misaligned models cannot pollute fraud_memory. `write_reasoning_checkpoint()` stores distilled checkpoints, not transcripts — memory grows at O(investigations), not O(reasoning steps). |
+| **Deduplication** | ✅ Live | [`consolidate_fraud_memory()`](agent_tools.py) merges rows with cosine distance < `DEDUP_DISTANCE_THRESHOLD`. Highest-confidence wins; evidence counts sum; losers get `superseded_by` set. Wired to the *"🧹 Run dedup"* sidebar button. Seed loader uses the same threshold for idempotency, so paraphrased duplicates of catalog patterns also get caught. |
+| **Confidence Decay** | ✅ Live (dry-run + apply) | [`decay_fraud_memory(half_life_days, dry_run, grace_period_days, floor)`](agent_tools.py). Exponential half-life: `confidence *= exp(-ln(2) * days_unreinforced / half_life_days)`. Two sidebar buttons: *"📉 Preview decay"* (no writes) and *"📉 Apply decay"*. Reinforcement signal flows from `reinforce_pattern()` (called when a pattern wins the routing gate) and from `consolidate_fraud_memory()`. |
+| **Reconciliation** | 🟡 POC-phase decision | Detection of contradiction is domain-specific — same-`entity_ref` + opposing verdict semantics. We treat this as a customer-led design decision in POC planning: auto-supersede vs human-in-loop queue vs evidence-weighted. Schema-ready (`superseded_by`). |
+| **Compaction** | 🟡 POC-phase decision | Archive policy for superseded + decayed-below-floor rows. Cadence and retention horizon are customer-led decisions for POC planning. |
 
-**Reconciliation**: When a flagged transaction is later verified as a false positive, the older conclusion must be superseded. Without reconciliation, the agent accumulates false pattern matches that poison future investigations. The `superseded_by` chain (implemented in the EV charger platform) ensures truth evolves rather than accumulates.
-
-**Confidence Decay**: Fraud patterns are ephemeral. A 'hot' card-testing pattern from six months ago may be irrelevant today. Confidence decay ensures the knowledge store stays lean and current — memories that aren't reinforced by new evidence fade automatically.
-
-The remaining three duties — **write control** (only confirmed outcomes persist), **deduplication** (near-duplicate patterns merged), and **compaction** (periodic re-clustering) — apply identically to fraud as they do to IoT diagnostics. The memory infrastructure is domain-agnostic. Only the data flowing through it changes.
-
+> All five duties are now grep-able in the codebase, not just listed here. Tunable thresholds (routing gates, dedup, write control) are env-overridable via `.env` — see [`.env.example`](.env.example).
+>
+> The two POC-phase duties (Reconciliation, Compaction) have a dedicated planning artifact: **[MEMORY_MAINTENANCE_POC.md](MEMORY_MAINTENANCE_POC.md)** — five design questions for Reconciliation, four for Compaction. Customer-facing; bring it to the POC kickoff. This is intentionally *not* shipped as code — these duties require domain-specific judgment about regulatory environment, risk appetite, and operating model that only the buying team can make.
+>
 > For the full five-duty framework, see [VOCABULARY.md](./VOCABULARY.md).
 
 ---
@@ -141,9 +201,11 @@ In your TiDB Cloud SQL Editor, run `schema.sql`.
 This creates all tables in one step:
 - `customers`, `orders`, `products` — relational tables with TiFlash replicas
 - `sales_knowledge` — vector knowledge base with HNSW index
-- `agent_sessions`, `chat_history` — episodic memory tables
+- `agent_sessions`, `chat_history` — conversation log tables
 - `reviews` — product and service reviews with sentiment scores and vector embeddings
 - `betting_events`, `bets` — sports betting tables with TiFlash replicas
+- **`fraud_memory`** — vector-indexed semantic memory of confirmed fraud patterns (cognitive foundation)
+- **`agent_reasoning`** — structured episodic checkpoints (observation/hypothesis/evidence/confidence/resolution)
 
 ### 3. Seed the demo data
 
@@ -180,6 +242,22 @@ python execution/seed_betting_data.py
 
 ## Running the demos
 
+### Known-good demo triggers
+
+These triggers point at IPs and customers that actually exist in `seed_fraud_data.py` / `seed_betting_data.py`. Use them when demoing — querying an IP that isn't in the seed data leaves the agent with nothing to verify on the SHORTCUT path and produces a fallback-summary report at 0.50 confidence.
+
+| Vertical | Trigger (paste into Admin chat or CLI) | Expected path |
+|---|---|---|
+| Fraud — velocity burst | `investigate suspicious orders from IP 185.15.54.22` | SHORTCUT once warm (5 pending orders seeded against this IP) |
+| Fraud — headless bot | `investigate orders with Puppeteer or Playwright user agents` | EXPLORE first time, SHORTCUT after pattern compounds |
+| Fraud — chargeback fraud | `investigate customer 4 for chargeback fraud` | EXPLORE — the agent will find Clayton Knight's 6 chargebacks across 2 rotating cards, with deliveries dated *before* his signup |
+| Betting — arbitrage | `Customer placing opposing home + away bets from IP 203.0.113.99 within seconds` | SHORTCUT once pattern 18 (arbitrage) is in `fraud_memory` |
+| Betting — velocity | `customer 1 placed 8 bets from IP 91.108.56.177 in 30 minutes` | EXPLORE first time |
+
+The "Clayton Knight" investigation is the strongest single demo — the agent independently discovers the *delivery-confirmed-before-signup* anomaly (5 of 6 chargebacks), which is not in any seed catalog. That's the capability multiplier in one slide.
+
+---
+
 ### Demo 1 — Agent UI (primary demo)
 
 ```bash
@@ -210,7 +288,7 @@ A chat interface with a live **Agent Memory** sidebar showing the chain of thoug
 - `"Which products have the most negative reviews?"`
   - *Shows: HTAP columnar scan + sentiment aggregation in one query*
 
-Watch the sidebar update in real time — the agent logs its full reasoning to `chat_history` in TiDB on every turn.
+Watch the sidebar update in real time. For the **Customer (RAG) path**, the conversation transcript persists to `chat_history`. For the **Admin (cognitive foundation) path**, the agent writes a structured checkpoint to `agent_reasoning` — observation, hypothesis, evidence_refs, confidence, resolution — which is what the slim summary call reads to produce the report. Two paths, two memory shapes, deliberately contrasted.
 
 ---
 
@@ -286,17 +364,25 @@ A terminal version of the agent loop — useful for showing raw chain-of-thought
 
 ```
 Agent_AG/
-├── agent_tools.py          # All agent tools: SQL, vector, fraud, betting write-backs
-├── agent_state.py          # StateManager — session and history management
+├── agent_tools.py          # Substrate: assemble_context, route_investigation,
+│                           #   consolidate_fraud_memory, recall_similar_fraud,
+│                           #   compound_resolution, write_reasoning_checkpoint,
+│                           #   plus legacy execute_sql / vector_search / write-backs
+├── cognitive_loop.py       # The investigation loop: assemble → route → tool-use → slim summary
 ├── generate_world.py       # Seeds the full database (run once)
-├── schema.sql              # Full TiDB schema: all tables, TiFlash replicas, HNSW vector indexes
+├── schema.sql              # Full TiDB schema (now includes fraud_memory + agent_reasoning)
 ├── live_pulse.py           # Streams live orders every 500ms (fraud demo)
 ├── live_betting_pulse.py   # Streams live bets every 500ms (sports betting demo)
 ├── .env.example            # Credential template
 │
+├── adapters/                       # Thesis 11 — domain plugins on a generic substrate
+│   ├── fraud/__init__.py           # 16 e-commerce fraud patterns + tier callables
+│   └── betting/__init__.py         # 3 sports-betting patterns + tier callables (same substrate)
+│
 ├── execution/
-│   ├── agent_ui.py               # Demo 1 — Streamlit chat UI with agent memory sidebar
-│   ├── fraud_dashboard.py        # Demo 2 — Real-time fraud monitor
+│   ├── agent_ui.py                    # Demo 1 — Streamlit chat UI with agent memory sidebar
+│   ├── betting_investigation.py       # CLI entry-point for the betting adapter (Thesis 11 demo)
+│   ├── fraud_dashboard.py             # Demo 2 — Real-time fraud monitor
 │   ├── sports_betting_dashboard.py  # Demo 3 — Betting risk and fraud monitor
 │   ├── run_agent.py              # Demo 4 — CLI agent loop
 │   ├── seed_demo_data.py         # Creates the demo persona (Bernard)
@@ -307,7 +393,7 @@ Agent_AG/
 │   └── apply_fraud_schema.py     # Schema migration helper (run if needed)
 │
 └── directives/
-    └── tidb_agent_demo.md        # Agent persona and operating instructions
+    └── tidb_agent_demo.md        # Demo directive: lifecycle, business value, demo flow, procedural memory
 ```
 
 ---
@@ -331,11 +417,11 @@ Agent_AG/
 
 This repo is one of three implementations demonstrating the cognitive foundation architecture across different domains:
 
-| Repo | Domain | Primary memory tier | Custodial duty spotlight | Business outcome |
+| Repo | Domain | Memory tier spotlight | Custodial duty spotlight | Business outcome |
 |---|---|---|---|---|
 | [`tidb-self-healing-db-agent`](https://github.com/bernard-kavanagh/tidb-self-healing-db-agent) | Database operations | **Procedural** | Write control + branching safety | Reduced MTTR, safe autonomous remediation |
-| [`ev_charger_anomaly_detection`](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) | Industrial IoT | **Semantic** | All five — the reference implementation | 10x token reduction, 24/7 monitoring at capped cost |
-| [`tidb_fraud_detection`](https://github.com/bernard-kavanagh/tidb_fraud_detection) | Fintech / Gaming | **Episodic** | Reconciliation + confidence decay | Adaptive fraud detection, regulatory-grade audit trail |
+| [`ev_charger_anomaly_detection`](https://github.com/bernard-kavanagh/ev_charger_anomaly_detection) | Industrial IoT | **Semantic** | All five duties — the production reference | 10x token reduction, 24/7 monitoring at capped cost |
+| [`tidb_fraud_detection`](https://github.com/bernard-kavanagh/tidb_fraud_detection) | Fintech / Gaming | **Three tiers, two adapters** | Write Control, Deduplication, Confidence Decay live; Reconciliation + Compaction as POC-phase decisions | Adaptive fraud detection, regulatory-grade audit trail, multi-vertical adapter proof |
 
 All three repos run on the same principle: a **unified data substrate** where the agent's memory lives alongside operational data. The **domain adapter** changes. The cognitive foundation stays the same.
 

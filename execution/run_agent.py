@@ -17,7 +17,8 @@ def run_agent_loop():
     print(f"Session ID: {session_id}")
     
     # Initialize Session in DB (Fixes ForeignKey Error)
-    create_session(session_id, user_id="demo_user")
+    create_session(session_id, user_id="demo_user",
+                   metadata={"source": "run_agent.cli"})
     
     # Helper to print and log
     def respond(role, content, tool_used=None):

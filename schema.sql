@@ -193,3 +193,184 @@ CREATE TABLE IF NOT EXISTS bets (
 ALTER TABLE betting_events SET TIFLASH REPLICA 1;
 ALTER TABLE bets SET TIFLASH REPLICA 1;
 
+-- ==========================================
+-- 7. COGNITIVE FOUNDATION — SEMANTIC MEMORY (fraud_memory)
+-- ==========================================
+
+/*
+   fraud_memory — the semantic memory tier of the cognitive foundation.
+
+   Stores confirmed fraud patterns learned from prior investigations as
+   vector-indexed records, scoped globally or per-entity (customer/IP).
+   This is the table that turns the system from static RAG into compounding
+   semantic memory: every confirmed fraud event becomes a recallable pattern
+   for future agent sessions.
+
+   Maintained by the five custodial duties:
+     - write control:      only confirmed outcomes persist
+     - deduplication:      cosine distance < 0.15 → merge
+     - reconciliation:     superseded_by chains the supersede event
+     - confidence decay:   unreinforced patterns fade over time
+     - compaction:         periodic re-clustering keeps the store lean
+*/
+CREATE TABLE IF NOT EXISTS fraud_memory (
+    pattern_id          INT AUTO_INCREMENT PRIMARY KEY,
+    scope               ENUM('global', 'entity') NOT NULL DEFAULT 'global',
+    entity_ref          VARCHAR(100) NULL,                -- customer_id or ip_address when scope='entity'
+    content             TEXT NOT NULL,                    -- semantically-banded pattern description
+    embedding           VECTOR(384),                      -- all-MiniLM-L6-v2 output
+    confidence          DECIMAL(4,3) NOT NULL DEFAULT 0.850,
+    evidence_count      INT NOT NULL DEFAULT 1,
+    superseded_by       INT NULL,                         -- pattern_id that supersedes this row
+    last_reinforced_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_scope_entity (scope, entity_ref),
+    INDEX idx_superseded (superseded_by)
+);
+
+ALTER TABLE fraud_memory SET TIFLASH REPLICA 1;
+
+ALTER TABLE fraud_memory DROP INDEX IF EXISTS idx_fraud_mem_embedding;
+ALTER TABLE fraud_memory ADD VECTOR INDEX idx_fraud_mem_embedding ((VEC_COSINE_DISTANCE(embedding)));
+
+-- ==========================================
+-- 8. COGNITIVE FOUNDATION — EPISODIC CHECKPOINTS (agent_reasoning)
+-- ==========================================
+
+/*
+   agent_reasoning — structured episodic memory.
+
+   NOT a conversation transcript. Each row is an outcomes-only checkpoint
+   written by the agent at the end of an investigation. Fields are the
+   contract for the slim summary call: the summary LLM reads ONE row of
+   this table, not the entire loop conversation, producing the final
+   investigation report from structured input.
+
+   The contract:
+     - observation:    what the agent saw (signals, anomalies)
+     - hypothesis:     what the agent thinks is happening
+     - evidence_refs:  JSON list of pointers (order_ids, IPs, fraud_memory pattern_ids)
+     - confidence:     the agent's calibrated confidence in the resolution
+     - resolution:     what was decided/done (flag, clear, escalate)
+*/
+CREATE TABLE IF NOT EXISTS agent_reasoning (
+    reasoning_id    INT AUTO_INCREMENT PRIMARY KEY,
+    session_id      VARCHAR(36),
+    observation     TEXT,
+    hypothesis      TEXT,
+    evidence_refs   JSON,
+    confidence      DECIMAL(4,3),
+    resolution      TEXT,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_session_created (session_id, created_at),
+    FOREIGN KEY (session_id) REFERENCES agent_sessions(session_id)
+);
+
+ALTER TABLE agent_reasoning SET TIFLASH REPLICA 1;
+
+-- ==========================================
+-- 9. SCHEMA EXTENSIONS FOR EXPANDED SEED CATALOG (Phase A)
+-- ==========================================
+--
+-- The 16 e-commerce fraud patterns in adapters/fraud/SEED_CATALOG reference
+-- signals the original schema does not expose. These additions give every
+-- catalog pattern a verification path so the agent loop can actually check
+-- the signals it shortcuts on.
+--
+-- Idempotency: all ALTER statements use IF NOT EXISTS (TiDB 5.0+). All new
+-- tables use CREATE TABLE IF NOT EXISTS. Safe to re-run.
+
+-- --- customers: synthetic-identity + behavioural signals ---
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS email_domain VARCHAR(100);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS timezone VARCHAR(50);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS shipping_address JSON;
+
+-- --- orders: billing/shipping split, device, browser, behavioural ---
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS billing_country VARCHAR(50);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_country VARCHAR(50);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS shipping_address TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS device_id VARCHAR(100);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_agent VARCHAR(500);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS checkout_seconds DECIMAL(6,2);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_expedited BOOLEAN DEFAULT FALSE;
+
+-- --- products: digital-goods flag for gift-card laundering pattern ---
+ALTER TABLE products ADD COLUMN IF NOT EXISTS is_digital_giftcard BOOLEAN DEFAULT FALSE;
+
+-- --- login_attempts: credential-stuffing precursor detection ---
+CREATE TABLE IF NOT EXISTS login_attempts (
+    attempt_id    INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id   INT,
+    ip_address    VARCHAR(45),
+    country       VARCHAR(50),
+    success       BOOLEAN,
+    attempted_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_login_customer_time (customer_id, attempted_at),
+    INDEX idx_login_ip_time (ip_address, attempted_at)
+);
+ALTER TABLE login_attempts SET TIFLASH REPLICA 1;
+
+-- --- refunds: serial-returner + triangulation patterns ---
+CREATE TABLE IF NOT EXISTS refunds (
+    refund_id      INT AUTO_INCREMENT PRIMARY KEY,
+    order_id       INT,
+    customer_id    INT,
+    reason         VARCHAR(200),
+    refund_method  VARCHAR(50),                  -- e.g. 'original', 'gift_card', 'store_credit'
+    refunded_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_refund_customer (customer_id),
+    FOREIGN KEY (order_id) REFERENCES orders(order_id),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+ALTER TABLE refunds SET TIFLASH REPLICA 1;
+
+-- --- chargebacks: friendly-fraud / double-dip pattern ---
+CREATE TABLE IF NOT EXISTS chargebacks (
+    chargeback_id           INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id             INT,
+    card_last4              CHAR(4),
+    filed_at                DATETIME DEFAULT CURRENT_TIMESTAMP,
+    delivery_confirmed_at   DATETIME,
+    INDEX idx_chargeback_customer (customer_id),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+ALTER TABLE chargebacks SET TIFLASH REPLICA 1;
+
+-- --- freight_forwarders: shipping-redirect detection lookup ---
+CREATE TABLE IF NOT EXISTS freight_forwarders (
+    forwarder_id     INT AUTO_INCREMENT PRIMARY KEY,
+    address_pattern  VARCHAR(255),               -- substring or postcode match
+    country          VARCHAR(50),
+    known_since      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE freight_forwarders SET TIFLASH REPLICA 1;
+
+-- ==========================================
+-- 10. BETTING ADAPTER SCHEMA EXTENSIONS (Phase A)
+-- ==========================================
+
+-- --- customer_bonuses: bonus-abuse detection ---
+CREATE TABLE IF NOT EXISTS customer_bonuses (
+    bonus_id            INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id         INT,
+    bonus_type          VARCHAR(50),             -- e.g. 'first_deposit', 'reload', 'free_bet'
+    claimed_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    qualifying_session  VARCHAR(100),            -- shared session/IP/device fingerprint
+    INDEX idx_bonus_customer (customer_id),
+    INDEX idx_bonus_session (qualifying_session)
+);
+ALTER TABLE customer_bonuses SET TIFLASH REPLICA 1;
+
+-- --- odds_history: sharp-money / insider-knowledge detection ---
+CREATE TABLE IF NOT EXISTS odds_history (
+    history_id    INT AUTO_INCREMENT PRIMARY KEY,
+    event_id      INT,
+    recorded_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    home_odds     DECIMAL(6,3),
+    away_odds     DECIMAL(6,3),
+    draw_odds     DECIMAL(6,3),
+    suspended     BOOLEAN DEFAULT FALSE,
+    INDEX idx_odds_event_time (event_id, recorded_at)
+);
+ALTER TABLE odds_history SET TIFLASH REPLICA 1;
+

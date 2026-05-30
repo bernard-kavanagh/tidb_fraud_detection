@@ -16,7 +16,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import anthropic
 
-from agent_tools import execute_sql, vector_search, log_interaction, create_session, flag_order, get_suspicious_orders, get_review_analytics
+from agent_tools import execute_sql, vector_search, log_interaction, create_session, flag_order, get_suspicious_orders, get_review_analytics, consolidate_fraud_memory, seed_fraud_memory_from_adapter, decay_fraud_memory
+from cognitive_loop import run_investigation
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="TiDB Unified Agent", layout="wide")
@@ -24,7 +25,11 @@ st.set_page_config(page_title="TiDB Unified Agent", layout="wide")
 # --- SESSION STATE ---
 if 'session_id' not in st.session_state:
     st.session_state['session_id'] = str(uuid.uuid4())
-    create_session(st.session_state['session_id'], user_id="demo_user_ui")
+    create_session(
+        st.session_state['session_id'],
+        user_id="demo_user_ui",
+        metadata={"source": "agent_ui.bootstrap"},
+    )
     st.session_state['messages'] = []
     st.session_state['chain_of_thought'] = []
 
@@ -51,7 +56,88 @@ if st.sidebar.button("Clear Memory"):
     st.session_state['messages'] = []
     st.session_state['chain_of_thought'] = []
     st.rerun()
-    
+
+# Seed fraud_memory from the adapter's SEED_CATALOG — gives a cold cluster
+# the same shortcut behaviour as a warmed production cluster on day one.
+if st.sidebar.button("🌱 Seed fraud_memory (adapter catalog)"):
+    seed_result = seed_fraud_memory_from_adapter()
+    try:
+        parsed = json.loads(seed_result)
+        st.sidebar.success(
+            f"Seeded {len(parsed.get('seeded', []))} new patterns "
+            f"({len(parsed.get('already_present', []))} already present)"
+        )
+    except Exception as e:
+        st.sidebar.error(f"Seed failed: {e}")
+
+# Custodial duty 4 — Confidence Decay. Two-button workflow: preview first
+# (dry-run), apply second. Mirrors how a regulated environment would actually
+# operate the duty — no silent writes.
+if st.sidebar.button("📉 Preview decay (dry-run)"):
+    preview = decay_fraud_memory(dry_run=True)
+    try:
+        parsed = json.loads(preview)
+        n = parsed.get("eligible_decayed", 0)
+        will_lose = sum(1 for p in parsed.get("patterns", []) if p.get("will_lose_routing"))
+        st.sidebar.info(
+            f"Decay preview: {n} pattern(s) would decay. "
+            f"{will_lose} would drop below routing gate. "
+            f"(grace={parsed.get('grace_period_days')}d, half-life={parsed.get('half_life_days')}d)"
+        )
+        if n:
+            st.session_state['chain_of_thought'].append({
+                "step": "📉 Custodial duty 4 — Confidence Decay (PREVIEW)",
+                "content": (f"Dry-run: {n} patterns eligible. "
+                            f"{will_lose} would drop below the {0.85} routing gate."),
+                "tool": json.dumps(parsed.get("patterns", []), default=str, indent=2),
+            })
+    except Exception as e:
+        st.sidebar.error(f"Preview failed: {e}")
+
+if st.sidebar.button("📉 Apply decay (writes)"):
+    result = decay_fraud_memory(dry_run=False)
+    try:
+        parsed = json.loads(result)
+        n = parsed.get("eligible_decayed", 0)
+        will_lose = sum(1 for p in parsed.get("patterns", []) if p.get("will_lose_routing"))
+        st.sidebar.success(
+            f"Decay applied: {n} pattern(s) updated. "
+            f"{will_lose} dropped below routing gate."
+        )
+        if n:
+            st.session_state['chain_of_thought'].append({
+                "step": "📉 Custodial duty 4 — Confidence Decay (APPLIED)",
+                "content": (f"Wrote {n} updates. "
+                            f"{will_lose} patterns no longer drive shortcuts. "
+                            f"Stale knowledge fades — Thesis 08."),
+                "tool": json.dumps(parsed.get("patterns", []), default=str, indent=2),
+            })
+    except Exception as e:
+        st.sidebar.error(f"Apply failed: {e}")
+
+# Custodial duty 2 — Deduplication. Surfaces a five-duties-as-SQL moment
+# on the demo: click, watch fraud_memory shrink, see the merge report.
+if st.sidebar.button("🧹 Run dedup (custodial duty)"):
+    result = consolidate_fraud_memory()
+    try:
+        parsed = json.loads(result)
+        if parsed.get("status") == "ok":
+            n = len(parsed.get("merges", []))
+            st.sidebar.success(
+                f"Dedup: {parsed.get('active_rows_before', 0)} → "
+                f"{parsed.get('active_rows_after', 0)} rows ({n} cluster(s) merged)"
+            )
+            if n:
+                st.session_state['chain_of_thought'].append({
+                    "step": "🧹 Custodial duty — Deduplication",
+                    "content": f"Merged {n} near-duplicate cluster(s). Evidence consolidated; loser rows superseded_by → kept.",
+                    "tool": json.dumps(parsed.get("merges", []), default=str, indent=2),
+                })
+        else:
+            st.sidebar.error(f"Dedup error: {parsed.get('error')}")
+    except Exception as e:
+        st.sidebar.error(f"Dedup parse failed: {e}")
+
 st.sidebar.divider()
 st.sidebar.subheader("Recent Thoughts")
 
@@ -105,48 +191,118 @@ if prompt := st.chat_input("Ask about orders, products, or policies..."):
             log_interaction(st.session_state['session_id'], 'assistant', result, tool_used='flag_order')
             st.rerun()
 
-        # --- INTENT: SUSPICIOUS ORDERS ---
-        suspicious_keywords = ['suspicious', 'fraud', 'anomal', 'at risk', 'risk', 'velocity', 'flagged orders']
-        if any(kw in prompt.lower() for kw in suspicious_keywords):
-            suspicious_data = get_suspicious_orders()
-
-            st.session_state['chain_of_thought'].append({
-                "step": "🕵️ Fraud Detection (HTAP)",
-                "content": "Running TiFlash velocity + high-value anomaly query...",
-                "tool": suspicious_data
-            })
-
-            api_key = os.getenv('ANTHROPIC_API_KEY')
-            if api_key:
+        # --- INTENT: FRAUD INVESTIGATION (cognitive foundation loop) ---
+        # Triggered when an Admin asks about suspicious/fraud activity. Replaces the
+        # previous keyword-routed synthesis call with a real tool-use loop driven by
+        # assemble_context → routing → cached system prompt → slim summary.
+        suspicious_keywords = ['suspicious', 'fraud', 'anomal', 'at risk', 'risk', 'velocity', 'flagged orders', 'investigate']
+        if user_role == "Admin" and any(kw in prompt.lower() for kw in suspicious_keywords):
+            # Extract optional entity_ref from the prompt — order/customer/IP — to focus the investigation
+            entity_ref = None
+            order_match = re.search(r'order\s*#?(\d+)', prompt.lower())
+            if order_match:
                 try:
-                    client = anthropic.Anthropic(api_key=api_key)
-                    synthesis_prompt = f"""You are a fraud detection assistant powered by TiDB HTAP.
-The user asked: "{prompt}"
+                    oid = int(order_match.group(1))
+                    cust_lookup = execute_sql(f"SELECT customer_id FROM orders WHERE order_id = {oid} LIMIT 1")
+                    parsed = json.loads(cust_lookup) if cust_lookup and cust_lookup.startswith('[') else None
+                    if parsed:
+                        entity_ref = str(parsed[0]['customer_id'])
+                except Exception:
+                    pass
 
-Here are the suspicious orders returned by the fraud detection query:
-{suspicious_data}
-
-The query flags orders where:
-- Amount > $3,000 (high-value anomaly)
-- OR the same IP placed 3+ orders within the last 24 hours (velocity burst)
-
-Explain clearly WHY each order is suspicious, referencing the actual data (customer name, IP address, amount, country).
-Be specific and concise. Keep the response under 150 words."""
-
-                    message = client.messages.create(
-                        model="claude-haiku-4-5",
-                        max_tokens=400,
-                        messages=[{"role": "user", "content": synthesis_prompt}]
+            def on_event(event_type, payload):
+                """Stream loop events into the chain-of-thought sidebar."""
+                if event_type == "assembled":
+                    sources_md = " | ".join(
+                        f"{k}={v.get('tokens', 0)}t/{v.get('status', '?')}"
+                        for k, v in payload.get("sources", {}).items()
                     )
-                    final_response = message.content[0].text
-                except Exception as e:
-                    final_response = f"**Suspicious Orders:**\n{suspicious_data}\n\n*⚠️ Claude synthesis failed: {e}*"
+                    st.session_state['chain_of_thought'].append({
+                        "step": "🧠 Context assembled (zero LLM calls)",
+                        "content": f"Budget {payload['budget_used']}/{payload['budget_total']} tokens. {sources_md}",
+                        "tool": payload.get("system_context", "")[:800],
+                    })
+                elif event_type == "routed":
+                    gates = payload.get("gates", {})
+                    st.session_state['chain_of_thought'].append({
+                        "step": f"🚦 Routed → {payload['path']} ({payload['model']})",
+                        "content": payload["reason"],
+                        "tool": json.dumps(gates, default=str, indent=2),
+                    })
+                elif event_type == "reinforced":
+                    st.session_state['chain_of_thought'].append({
+                        "step": "💪 Pattern reinforced",
+                        "content": (f"fraud_memory pattern {payload['pattern_id']} bumped "
+                                    f"(last_reinforced_at = NOW, evidence_count += 1). "
+                                    f"Decay now treats this as actively-used."),
+                    })
+                elif event_type == "tool_call":
+                    st.session_state['chain_of_thought'].append({
+                        "step": f"🔧 Agent → {payload['name']}",
+                        "content": json.dumps(payload.get("input", {}), default=str)[:400],
+                    })
+                elif event_type == "tool_result":
+                    st.session_state['chain_of_thought'].append({
+                        "step": f"📥 Result: {payload['name']}",
+                        "content": str(payload.get("result", ""))[:600],
+                    })
+                elif event_type == "summary":
+                    st.session_state['chain_of_thought'].append({
+                        "step": "📝 Slim summary (Haiku on structured checkpoint)",
+                        "content": f"reasoning_id={payload.get('reasoning_id')} confidence={payload.get('confidence')}",
+                    })
+
+            # Tier 4 in assemble_context joins agent_sessions.user_id == entity_ref.
+            # The UI session was created with user_id="demo_user_ui" — that join
+            # would return zero prior investigations. Mint an entity-scoped session
+            # for this investigation so prior runs for the same entity are visible.
+            if entity_ref:
+                entity_session_id = str(uuid.uuid4())
+                create_session(
+                    entity_session_id,
+                    user_id=str(entity_ref),
+                    metadata={
+                        "source": "agent_ui.investigation",
+                        "parent_session_id": st.session_state['session_id'],
+                        "entity_ref": str(entity_ref),
+                    },
+                )
+                investigation_session_id = entity_session_id
+                st.session_state['chain_of_thought'].append({
+                    "step": "🔗 Entity-scoped session",
+                    "content": f"Investigation session bound to entity_ref={entity_ref} for Tier 4 linkage.",
+                    "tool": investigation_session_id,
+                })
             else:
-                final_response = f"**Suspicious Orders:**\n{suspicious_data}\n\n*⚠️ Add `ANTHROPIC_API_KEY` to `.env` for natural language answers*"
+                investigation_session_id = st.session_state['session_id']
+
+            with st.spinner("Running cognitive foundation investigation..."):
+                try:
+                    result = run_investigation(
+                        trigger_text=prompt,
+                        session_id=investigation_session_id,
+                        entity_ref=entity_ref,
+                        on_event=on_event,
+                    )
+                    if result.get("error"):
+                        final_response = f"⚠️ {result['error']}"
+                    else:
+                        report = result.get("summary", {}).get("report")
+                        routing = result.get("routing", {})
+                        final_response = (
+                            f"**Investigation report** _(via {routing.get('path')} path, "
+                            f"model={routing.get('model')}, "
+                            f"rounds_budget={routing.get('max_tool_rounds')})_\n\n"
+                            f"{report or '_No report generated — agent did not write a checkpoint._'}"
+                        )
+                except Exception as e:
+                    final_response = f"❌ Investigation failed: {e}"
 
             message_placeholder.markdown(final_response)
             st.session_state['messages'].append({"role": "assistant", "content": final_response})
-            log_interaction(st.session_state['session_id'], 'assistant', final_response, tool_used='get_suspicious_orders')
+            # Conversation log stays on the UI session; the investigation's
+            # episodic checkpoint is already on the entity-scoped session.
+            log_interaction(st.session_state['session_id'], 'assistant', final_response, tool_used='run_investigation')
             st.rerun()
 
         # --- INTENT: REVIEW ANALYTICS (Admin only) ---
