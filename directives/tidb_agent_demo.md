@@ -328,11 +328,9 @@ When invoked on this repo as a working assistant:
 
 ## References
 
+- [../ARCHITECTURE.md](../ARCHITECTURE.md) — architecture deep-dive: theses status, lifecycle diagram, three-tier memory, custodial duties
+- [../MEMORY_MAINTENANCE_POC.md](../MEMORY_MAINTENANCE_POC.md) — POC planning conversations for Duty 3 (Reconciliation) and Duty 5 (Compaction). Bring this to the POC kickoff.
 - [cognitive_loop.py](../cognitive_loop.py) — the loop and the system prompt
 - [agent_tools.py](../agent_tools.py) — substrate functions (assemble, route, duties)
 - [adapters/fraud/__init__.py](../adapters/fraud/__init__.py) — fraud adapter tier callables + SEED_CATALOG + SCHEMA_HINT
 - [adapters/betting/__init__.py](../adapters/betting/__init__.py) — second adapter (Thesis 11 proof)
-- [../MEMORY_MAINTENANCE_POC.md](../MEMORY_MAINTENANCE_POC.md) — POC planning conversations for Duty 3 (Reconciliation) and Duty 5 (Compaction). Bring this to the POC kickoff.
-- [../GTM/AGENT_LIFECYCLE.md](../../GTM/AGENT_LIFECYCLE.md) — canonical lifecycle reference
-- [../GTM/MANIFESTO.html](../../GTM/MANIFESTO.html) — the 12 theses
-- [../REDUNDANT_CODE_AUDIT.md](../REDUNDANT_CODE_AUDIT.md) — current cleanup state
