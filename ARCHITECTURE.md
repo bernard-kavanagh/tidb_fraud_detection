@@ -150,6 +150,34 @@ Memory that isn't maintained becomes a liability. Five custodial duties keep the
 
 ---
 
+## Differentiation: pytidb is the SDK, this is the pattern
+
+PingCAP's official [pytidb](https://github.com/pingcap/pytidb) SDK ships hybrid search, auto-embedding, a Pydantic-style schema layer, and an MCP server. Its memory-feature documentation points at a flat `memories` table with vector retrieval — useful, but a different layer of the stack. The Cognitive Foundation sits one layer above:
+
+| pytidb's memory shape (data-access layer) | Cognitive Foundation (memory-semantics layer) |
+|---|---|
+| Single `memories` table | Three typed tiers: `agent_reasoning` (episodic), `fraud_memory` (semantic), procedural in the adapter |
+| Vector retrieval | 5-tier priority-ordered context assembly under a 3,600-token budget |
+| No lifecycle | Five custodial duties (write control, dedup, reconciliation, decay, compaction) |
+| No temporal model | `last_reinforced_at`, `superseded_by`, `evidence_count`, exponential confidence decay |
+| No routing | Substrate-driven model selection on `confidence × similarity` |
+| No domain pattern | Adapter-as-plugin (Thesis 11) — same substrate, swap the catalog |
+
+The two compose. You can adopt pytidb's `TiDBClient` connection pooling, `EmbeddingFunction` (cloud, Bedrock, or local), or its built-in MCP server without changing this repo's schema. PingCAP investing in pytidb is independent corroboration that TiDB is the right substrate for AI-era memory; this repo is what you build *on top* of that substrate when you need typed memory and lifecycle semantics, not just embed-and-retrieve.
+
+### Production deployment shape
+
+The agent layer is fundamentally serverless-shaped: each `run_investigation()` call is stateless from the agent's perspective; all state lives in TiDB. That maps cleanly onto:
+
+- **AWS Lambda** triggered by EventBridge / SQS / Kinesis (event-driven, scale-to-zero)
+- **AWS ECS Fargate** for sustained worker throughput (no cold start, always-on)
+- **AWS Step Functions + Lambda** for long-running investigations with retry semantics or human-in-loop pauses
+- **AWS Bedrock Agents** as a managed-agent runtime drop-in for the Anthropic-SDK loop in `cognitive_loop.py`
+
+This repo does **not** ship a reference deployment manifest — that work belongs in a dedicated `tidb-cognitive-foundation-aws` repository (in planning). The honest answer to *"how do I run this in production?"* today is: clone, adapt, deploy how you usually do. The dedicated reference repo will close the gap with a Terraform/CDK starter, Lambda handler, Bedrock IAM policy templates, and a PrivateLink-to-TiDB-Cloud networking topology. Until then, the four serverless shapes above are the recommended deployment patterns — each fits the architecture cleanly because the substrate carries the state.
+
+---
+
 ## Why this matters for fraud and gaming
 
 Three claims this architecture makes that the standard "Flink + Kafka + vector DB + warehouse" stack cannot:

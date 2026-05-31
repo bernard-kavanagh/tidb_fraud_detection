@@ -251,6 +251,14 @@ For the architecture, theses, custodial-duty implementation details, and POC-pha
 
 ---
 
+## Composability with TiDB Python SDK
+
+PingCAP's official [pytidb](https://github.com/pingcap/pytidb) SDK ships an MCP server, a Pydantic-style schema layer, and built-in embedding functions (cloud-hosted Titan, AWS Bedrock-hosted Titan via Bedrock IAM, or local). The Cognitive Foundation **composes with pytidb**, not against it: pytidb is the data-access layer, the Cognitive Foundation provides the memory semantics — typed three-tier memory, custodial duties, substrate-driven routing — one layer above it. Adopting pytidb's `EmbeddingFunction` or its MCP server requires no schema changes here. Both projects converge on TiDB as the substrate for AI-era memory, which we treat as independent corroboration of the architectural bet rather than a competing approach.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#differentiation-pytidb-is-the-sdk-this-is-the-pattern) for the differentiation table and production-deployment shape.
+
+---
+
 ## Cognitive Foundation Portfolio
 
 This repo is one of three implementations demonstrating the cognitive foundation across different domains:
