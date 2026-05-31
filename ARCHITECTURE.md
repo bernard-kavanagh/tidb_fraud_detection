@@ -174,7 +174,7 @@ The agent layer is fundamentally serverless-shaped: each `run_investigation()` c
 - **AWS Step Functions + Lambda** for long-running investigations with retry semantics or human-in-loop pauses
 - **AWS Bedrock Agents** as a managed-agent runtime drop-in for the Anthropic-SDK loop in `cognitive_loop.py`
 
-This repo does **not** ship a reference deployment manifest — that work belongs in a dedicated `tidb-cognitive-foundation-aws` repository (in planning). The honest answer to *"how do I run this in production?"* today is: clone, adapt, deploy how you usually do. The dedicated reference repo will close the gap with a Terraform/CDK starter, Lambda handler, Bedrock IAM policy templates, and a PrivateLink-to-TiDB-Cloud networking topology. Until then, the four serverless shapes above are the recommended deployment patterns — each fits the architecture cleanly because the substrate carries the state.
+This repo is a demo, not a production deployment. It does not ship Terraform / CDK / Lambda / IAM templates — those are customer-environment-specific. The honest answer to *"how do I run this in production?"* is: clone, adapt, deploy how your platform team usually does. The four serverless shapes above are the recommended deployment patterns because the architecture is designed for them — the substrate carries the state, the agent layer is ephemeral.
 
 ---
 
